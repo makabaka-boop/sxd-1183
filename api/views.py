@@ -110,6 +110,7 @@ class PaperBatchViewSet(BaseModelViewSet):
         'created_at', 'updated_at', 'press_start', 'press_end',
         'batch_no', 'break_count', 'warp_count', 'reject_count',
     ]
+    http_method_names = ['get', 'post', 'head', 'options']
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -117,6 +118,24 @@ class PaperBatchViewSet(BaseModelViewSet):
         if self.action == 'retrieve':
             return PaperBatchDetailSerializer
         return PaperBatchListSerializer
+
+    def update(self, request, *args, **kwargs):
+        return Response(
+            {'error': '禁止直接修改批次信息，请通过专用业务接口操作'},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    def partial_update(self, request, *args, **kwargs):
+        return Response(
+            {'error': '禁止直接修改批次信息，请通过专用业务接口操作'},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        return Response(
+            {'error': '批次记录不允许删除'},
+            status=status.HTTP_403_FORBIDDEN
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -178,18 +197,17 @@ class PaperBatchViewSet(BaseModelViewSet):
         serializer = CutResultSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        if batch.status not in [StatusChoices.PENDING_CUT, StatusChoices.PENDING_REVIEW]:
-            return Response({'error': '当前状态不允许提交裁边结果'}, status=400)
+        if batch.status != StatusChoices.PENDING_CUT:
+            return Response({'error': '只有待裁边状态才能提交裁边结果'}, status=400)
         batch.warp_count = data['warp_count']
         batch.warp_note = data.get('warp_note', '')
         batch.break_count = data['break_count']
         batch.break_detail = data.get('break_detail', '')
         batch.save()
-        if batch.status == StatusChoices.PENDING_CUT:
-            try:
-                batch.transition(StatusChoices.PENDING_REVIEW, operator=data['operator'], remark=data.get('remark', ''))
-            except Exception as e:
-                return Response({'error': str(e)}, status=400)
+        try:
+            batch.transition(StatusChoices.PENDING_REVIEW, operator=data['operator'], remark=data.get('remark', ''))
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
         AnomalyDetectionService.check_break_cluster(batch)
         return Response(PaperBatchDetailSerializer(batch).data)
 
@@ -230,6 +248,16 @@ class PaperBatchViewSet(BaseModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         if data['passed']:
+            rule = ReviewRule.get_active()
+            if rule:
+                if batch.warp_count > rule.max_warp_count:
+                    return Response({
+                        'error': f'审核不通过：翘边数{batch.warp_count}超过规则最大值{rule.max_warp_count}'
+                    }, status=400)
+                if batch.break_count > rule.max_break_count:
+                    return Response({
+                        'error': f'审核不通过：破口数{batch.break_count}超过规则最大值{rule.max_break_count}'
+                    }, status=400)
             try:
                 batch.transition(StatusChoices.READY_BIND, operator=data['operator'], remark=data.get('reason', ''))
             except Exception as e:
@@ -303,6 +331,29 @@ class BreakRecordViewSet(BaseModelViewSet):
     queryset = BreakRecord.objects.all()
     serializer_class = BreakRecordSerializer
     filterset_fields = ['batch', 'operator']
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        br = serializer.save()
+        batch = br.batch
+        batch.break_count = batch.break_records.count()
+        batch.save()
+        AnomalyDetectionService.check_break_cluster(batch)
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            BreakRecordSerializer(br).data,
+            status=status.HTTP_201_CREATED,
+            headers=headers
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        batch = instance.batch
+        self.perform_destroy(instance)
+        batch.break_count = batch.break_records.count()
+        batch.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AnomalyAlertViewSet(BaseModelViewSet):
