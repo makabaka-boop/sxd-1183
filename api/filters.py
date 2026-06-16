@@ -1,4 +1,5 @@
 import django_filters
+from django.db.models import Q
 from .models import PaperBatch, StatusChoices, BindingPlan, PlanExecutionStatus, PlanRiskLevel, AnomalyAlert
 
 
@@ -66,8 +67,13 @@ class AnomalyAlertFilter(django_filters.FilterSet):
     alert_type = django_filters.ChoiceFilter(choices=AnomalyAlert.ALERT_TYPES, label='异常类型')
     is_resolved = django_filters.BooleanFilter(label='是否已处理')
     batch = django_filters.NumberFilter(field_name='batch_id', label='批次ID')
-    binding_plan = django_filters.NumberFilter(field_name='binding_plan_id', label='装册计划ID')
+    binding_plan = django_filters.NumberFilter(method='filter_binding_plan', label='装册计划ID')
 
     class Meta:
         model = AnomalyAlert
         fields = ['alert_type', 'is_resolved', 'batch', 'binding_plan']
+
+    def filter_binding_plan(self, queryset, name, value):
+        return queryset.filter(
+            Q(binding_plan_id=value) | Q(batch__binding_plan_id=value)
+        ).distinct()

@@ -3,7 +3,7 @@ from django.db.models import Count, Q
 from django.core.exceptions import ValidationError
 from .models import (
     PaperBatch, StatusChoices, ReviewRule, AnomalyAlert, PressPlate,
-    BindingPlan, PlanExecutionStatus, PlanRiskLevel,
+    BindingPlan, PlanExecutionStatus, PlanRiskLevel, StatusHistory,
 )
 
 
@@ -190,6 +190,7 @@ class PlanExecutionService:
                 continue
             batch.binding_plan = plan
             batch.save(update_fields=['binding_plan', 'updated_at'])
+            AnomalyAlert.objects.filter(batch=batch).update(binding_plan=plan)
             added.append({'id': batch.id, 'batch_no': batch.batch_no})
         cls._update_plan_status_on_batch_change(plan)
         cls._recalculate_risk(plan)
@@ -211,6 +212,7 @@ class PlanExecutionService:
                 continue
             batch.binding_plan = None
             batch.save(update_fields=['binding_plan', 'updated_at'])
+            AnomalyAlert.objects.filter(batch=batch).update(binding_plan=None)
             removed.append({'id': batch.id, 'batch_no': batch.batch_no})
         cls._update_plan_status_on_batch_change(plan)
         cls._recalculate_risk(plan)
@@ -305,12 +307,16 @@ class PlanExecutionService:
                 plan.save(update_fields=['execution_status'])
 
     @classmethod
+    def _get_plan_alerts(cls, plan: BindingPlan):
+        return AnomalyAlert.objects.filter(
+            Q(binding_plan=plan) | Q(batch__binding_plan=plan)
+        ).distinct()
+
+    @classmethod
     def _recalculate_risk(cls, plan: BindingPlan):
         plan.refresh_from_db()
         batches = PaperBatch.objects.filter(binding_plan=plan)
-        unresolved_alerts = AnomalyAlert.objects.filter(
-            binding_plan=plan, is_resolved=False
-        ).count()
+        unresolved_alerts = cls._get_plan_alerts(plan).filter(is_resolved=False).count()
         detained_count = batches.filter(status=StatusChoices.DETAINED).count()
         rejected_count = batches.filter(reject_count__gt=0).count()
         score = 0
@@ -338,9 +344,7 @@ class PlanExecutionService:
     @classmethod
     def get_plan_dashboard(cls, plan: BindingPlan) -> dict:
         progress = cls.recalculate_plan_progress(plan)
-        pending_alerts = AnomalyAlert.objects.filter(
-            binding_plan=plan, is_resolved=False
-        )
+        pending_alerts = cls._get_plan_alerts(plan).filter(is_resolved=False)
         alert_list = []
         for a in pending_alerts:
             alert_list.append({
@@ -368,9 +372,7 @@ class PlanExecutionService:
         result = []
         for plan in plans:
             progress = cls.recalculate_plan_progress(plan)
-            pending_alert_count = AnomalyAlert.objects.filter(
-                binding_plan=plan, is_resolved=False
-            ).count()
+            pending_alert_count = cls._get_plan_alerts(plan).filter(is_resolved=False).count()
             result.append({
                 'id': plan.id,
                 'plan_code': plan.plan_code,

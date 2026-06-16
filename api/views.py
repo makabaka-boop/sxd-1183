@@ -100,8 +100,8 @@ class BindingPlanViewSet(BaseModelViewSet):
                 data['total_batches'] = progress['total_batches']
                 data['confirmed_batches'] = progress['confirmed_batches']
                 data['completion_rate'] = progress['completion_rate']
-                data['pending_alert_count'] = AnomalyAlert.objects.filter(
-                    binding_plan=plan, is_resolved=False
+                data['pending_alert_count'] = PlanExecutionService._get_plan_alerts(plan).filter(
+                    is_resolved=False
                 ).count()
                 plans_data.append(data)
             return self.get_paginated_response(plans_data)
@@ -398,6 +398,8 @@ class PaperBatchViewSet(BaseModelViewSet):
         batch = self.get_object()
         if batch.status != StatusChoices.READY_BIND:
             return Response({'error': '只有可装册状态才能装册确认'}, status=400)
+        if batch.bind_confirmed_at is not None:
+            return Response({'error': '该批次已完成装册确认，不可重复提交'}, status=400)
         serializer = BindConfirmSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
