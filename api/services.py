@@ -3,7 +3,7 @@ from django.db.models import Count, Q
 from django.core.exceptions import ValidationError
 from .models import (
     PaperBatch, StatusChoices, ReviewRule, AnomalyAlert, PressPlate,
-    BindingPlan, PlanExecutionStatus, PlanRiskLevel, StatusHistory,
+    BindingPlan, PlanExecutionStatus, PlanRiskLevel, StatusHistory, PriorityLevel,
 )
 
 
@@ -19,12 +19,21 @@ class AnomalyDetectionService:
             if not AnomalyAlert.objects.filter(
                 batch=batch, alert_type='break_cluster', is_resolved=False
             ).exists():
+                urgent_prefix = '【加急批次】' if batch.is_urgent else ''
+                message = f'{urgent_prefix}批号 {batch.batch_no} 破口记录达 {batch.break_count} 处，超过阈值 {threshold}'
+                if batch.is_urgent:
+                    message += '，请紧急处理'
                 AnomalyAlert.objects.create(
                     batch=batch,
                     binding_plan=batch.binding_plan,
                     alert_type='break_cluster',
-                    message=f'批号 {batch.batch_no} 破口记录达 {batch.break_count} 处，超过阈值 {threshold}',
-                    extra={'break_count': batch.break_count, 'threshold': threshold},
+                    message=message,
+                    extra={
+                        'break_count': batch.break_count,
+                        'threshold': threshold,
+                        'is_urgent': batch.is_urgent,
+                        'urgent_reason': batch.urgent_reason,
+                    },
                 )
 
     @classmethod
@@ -42,12 +51,21 @@ class AnomalyDetectionService:
                 if not AnomalyAlert.objects.filter(
                     batch=batch, alert_type='press_timeout', is_resolved=False
                 ).exists():
+                    urgent_prefix = '【加急批次】' if batch.is_urgent else ''
+                    message = f'{urgent_prefix}批号 {batch.batch_no} 压平已 {batch.press_duration_minutes} 分钟，超过阈值 {max_minutes} 分钟'
+                    if batch.is_urgent:
+                        message += '，请紧急处理'
                     AnomalyAlert.objects.create(
                         batch=batch,
                         binding_plan=batch.binding_plan,
                         alert_type='press_timeout',
-                        message=f'批号 {batch.batch_no} 压平已 {batch.press_duration_minutes} 分钟，超过阈值 {max_minutes} 分钟',
-                        extra={'minutes': batch.press_duration_minutes, 'threshold': max_minutes},
+                        message=message,
+                        extra={
+                            'minutes': batch.press_duration_minutes,
+                            'threshold': max_minutes,
+                            'is_urgent': batch.is_urgent,
+                            'urgent_reason': batch.urgent_reason,
+                        },
                     )
 
     @classmethod
@@ -62,12 +80,21 @@ class AnomalyDetectionService:
             if not AnomalyAlert.objects.filter(
                 batch=batch, alert_type='plate_conflict', is_resolved=False
             ).exists():
+                urgent_prefix = '【加急批次】' if batch.is_urgent else ''
+                message = f'{urgent_prefix}板位 {plate.code} 存在冲突，批次 {batch.batch_no} 与其他批次同时占用'
+                if batch.is_urgent:
+                    message += '，请紧急处理'
                 AnomalyAlert.objects.create(
                     batch=batch,
                     binding_plan=batch.binding_plan,
                     alert_type='plate_conflict',
-                    message=f'板位 {plate.code} 存在冲突，批次 {batch.batch_no} 与其他批次同时占用',
-                    extra={'plate_code': plate.code, 'batch_no': batch.batch_no},
+                    message=message,
+                    extra={
+                        'plate_code': plate.code,
+                        'batch_no': batch.batch_no,
+                        'is_urgent': batch.is_urgent,
+                        'urgent_reason': batch.urgent_reason,
+                    },
                 )
         return conflict
 
@@ -86,18 +113,28 @@ class AnomalyDetectionService:
             if not AnomalyAlert.objects.filter(
                 batch=batch, alert_type='review_missing', is_resolved=False
             ).exists():
+                urgent_prefix = '【加急批次】' if batch.is_urgent else ''
+                message = f'{urgent_prefix}批号 {batch.batch_no} 待审核超过 {hours} 小时，审核遗漏风险'
+                if batch.is_urgent:
+                    message += '，请紧急处理'
                 AnomalyAlert.objects.create(
                     batch=batch,
                     binding_plan=batch.binding_plan,
                     alert_type='review_missing',
-                    message=f'批号 {batch.batch_no} 待审核超过 {hours} 小时，审核遗漏风险',
-                    extra={'hours': hours, 'pending_since': batch.updated_at.isoformat()},
+                    message=message,
+                    extra={
+                        'hours': hours,
+                        'pending_since': batch.updated_at.isoformat(),
+                        'is_urgent': batch.is_urgent,
+                        'urgent_reason': batch.urgent_reason,
+                    },
                 )
 
     @classmethod
     def run_all(cls):
         cls.check_press_timeout()
         cls.check_review_missing()
+        BatchUrgentService.check_urgent_batch_status()
         batches = PaperBatch.objects.filter(break_count__gt=0)
         for b in batches:
             cls.check_break_cluster(b)
@@ -158,6 +195,124 @@ class AnomalyDetectionService:
             'total_completed_with_press': batches.filter(press_end__isnull=False).count(),
             'timeout_count': timeout_batches,
         }
+
+
+class BatchUrgentService:
+
+    @classmethod
+    def mark_urgent(cls, batch: PaperBatch, operator: str, urgent_reason: str = '', priority: str = None) -> PaperBatch:
+        if batch.bind_confirmed_at is not None:
+            raise ValidationError('已装册确认的批次不能进行加急操作')
+        if batch.binding_plan and batch.binding_plan.execution_status == PlanExecutionStatus.ARCHIVED:
+            raise ValidationError('所属计划已归档，不能进行加急操作')
+        if priority and priority not in [c[0] for c in PriorityLevel.choices]:
+            raise ValidationError(f'无效的优先级值: {priority}')
+        batch.is_urgent = True
+        batch.urgent_reason = urgent_reason
+        batch.urgent_at = timezone.now()
+        batch.urgent_operator = operator
+        if priority:
+            batch.priority = priority
+        batch.save(update_fields=['is_urgent', 'urgent_reason', 'urgent_at', 'urgent_operator', 'priority', 'updated_at'])
+        StatusHistory.objects.create(
+            batch=batch,
+            from_status=batch.status,
+            to_status=batch.status,
+            operator=operator,
+            remark=f'批次加急，原因：{urgent_reason or "未填写"}',
+        )
+        if batch.binding_plan:
+            PlanExecutionService._recalculate_risk(batch.binding_plan)
+        cls._check_urgent_batch_anomaly(batch)
+        return batch
+
+    @classmethod
+    def cancel_urgent(cls, batch: PaperBatch, operator: str, reason: str = '') -> PaperBatch:
+        if not batch.is_urgent:
+            raise ValidationError('该批次当前未处于加急状态')
+        batch.is_urgent = False
+        batch.urgent_cancel_at = timezone.now()
+        batch.urgent_cancel_operator = operator
+        batch.save(update_fields=['is_urgent', 'urgent_cancel_at', 'urgent_cancel_operator', 'updated_at'])
+        StatusHistory.objects.create(
+            batch=batch,
+            from_status=batch.status,
+            to_status=batch.status,
+            operator=operator,
+            remark=f'取消加急，原因：{reason or "未填写"}',
+        )
+        if batch.binding_plan:
+            PlanExecutionService._recalculate_risk(batch.binding_plan)
+        return batch
+
+    @classmethod
+    def update_priority(cls, batch: PaperBatch, operator: str, priority: str) -> PaperBatch:
+        if priority not in [c[0] for c in PriorityLevel.choices]:
+            raise ValidationError(f'无效的优先级值: {priority}')
+        old_priority = batch.get_priority_display()
+        batch.priority = priority
+        batch.save(update_fields=['priority', 'updated_at'])
+        StatusHistory.objects.create(
+            batch=batch,
+            from_status=batch.status,
+            to_status=batch.status,
+            operator=operator,
+            remark=f'优先级变更：{old_priority} -> {dict(PriorityLevel.choices).get(priority, priority)}',
+        )
+        if batch.binding_plan:
+            PlanExecutionService._recalculate_risk(batch.binding_plan)
+        return batch
+
+    @classmethod
+    def _check_urgent_batch_anomaly(cls, batch: PaperBatch):
+        if not batch.is_urgent:
+            return
+        if batch.status in [StatusChoices.PENDING_REVIEW, StatusChoices.DETAINED]:
+            status_text = '待审核' if batch.status == StatusChoices.PENDING_REVIEW else '留置中'
+            if not AnomalyAlert.objects.filter(
+                batch=batch, alert_type='review_missing', is_resolved=False,
+                extra__has_key='is_urgent'
+            ).exists():
+                AnomalyAlert.objects.create(
+                    batch=batch,
+                    binding_plan=batch.binding_plan,
+                    alert_type='review_missing',
+                    message=f'【加急批次】批号 {batch.batch_no} 处于{status_text}状态，请优先处理',
+                    extra={
+                        'is_urgent': True,
+                        'urgent_reason': batch.urgent_reason,
+                        'batch_status': batch.status,
+                    },
+                )
+        unresolved_alerts = AnomalyAlert.objects.filter(
+            batch=batch, is_resolved=False
+        ).exclude(alert_type='review_missing').exists()
+        if unresolved_alerts:
+            if not AnomalyAlert.objects.filter(
+                batch=batch, alert_type='review_missing', is_resolved=False,
+                extra__has_key='has_other_anomaly'
+            ).exists():
+                AnomalyAlert.objects.create(
+                    batch=batch,
+                    binding_plan=batch.binding_plan,
+                    alert_type='review_missing',
+                    message=f'【加急批次】批号 {batch.batch_no} 存在未处理异常，请紧急处理',
+                    extra={
+                        'is_urgent': True,
+                        'urgent_reason': batch.urgent_reason,
+                        'has_other_anomaly': True,
+                    },
+                )
+
+    @classmethod
+    def check_urgent_batch_status(cls):
+        urgent_batches = PaperBatch.objects.filter(
+            is_urgent=True,
+            status__in=[StatusChoices.PENDING_REVIEW, StatusChoices.DETAINED],
+            bind_confirmed_at__isnull=True,
+        )
+        for batch in urgent_batches:
+            cls._check_urgent_batch_anomaly(batch)
 
 
 class PlanExecutionService:
@@ -319,13 +474,20 @@ class PlanExecutionService:
         unresolved_alerts = cls._get_plan_alerts(plan).filter(is_resolved=False).count()
         detained_count = batches.filter(status=StatusChoices.DETAINED).count()
         rejected_count = batches.filter(reject_count__gt=0).count()
+        urgent_count = batches.filter(is_urgent=True).count()
+        urgent_pending_count = batches.filter(
+            is_urgent=True,
+            status__in=[StatusChoices.PENDING_REVIEW, StatusChoices.DETAINED],
+        ).count()
         score = 0
         score += min(unresolved_alerts * 2, 6)
         score += min(detained_count * 3, 6)
         score += min(rejected_count * 1, 3)
-        if score >= 8:
+        score += min(urgent_count * 2, 4)
+        score += min(urgent_pending_count * 3, 6)
+        if score >= 10:
             new_risk = PlanRiskLevel.HIGH
-        elif score >= 4:
+        elif score >= 5:
             new_risk = PlanRiskLevel.MEDIUM
         elif score >= 1:
             new_risk = PlanRiskLevel.LOW
@@ -356,6 +518,17 @@ class PlanExecutionService:
                 'is_resolved': a.is_resolved,
                 'created_at': a.created_at,
             })
+        batches = PaperBatch.objects.filter(binding_plan=plan)
+        urgent_batch_count = batches.filter(is_urgent=True).count()
+        urgent_pending_count = batches.filter(
+            is_urgent=True,
+            status__in=[StatusChoices.PENDING_REVIEW, StatusChoices.DETAINED],
+        ).count()
+        progress['priority'] = plan.priority
+        progress['priority_display'] = plan.get_priority_display()
+        progress['urgent_reason'] = plan.urgent_reason
+        progress['urgent_batch_count'] = urgent_batch_count
+        progress['urgent_pending_count'] = urgent_pending_count
         progress['pending_alerts'] = alert_list
         progress['pending_alert_count'] = len(alert_list)
         progress['execution_status'] = plan.execution_status
@@ -373,12 +546,17 @@ class PlanExecutionService:
         for plan in plans:
             progress = cls.recalculate_plan_progress(plan)
             pending_alert_count = cls._get_plan_alerts(plan).filter(is_resolved=False).count()
+            batches = PaperBatch.objects.filter(binding_plan=plan)
+            urgent_batch_count = batches.filter(is_urgent=True).count()
             result.append({
                 'id': plan.id,
                 'plan_code': plan.plan_code,
                 'target_quantity': plan.target_quantity,
                 'planned_date': plan.planned_date,
                 'operator': plan.operator,
+                'priority': plan.priority,
+                'priority_display': plan.get_priority_display(),
+                'urgent_reason': plan.urgent_reason,
                 'execution_status': plan.execution_status,
                 'execution_status_display': plan.get_execution_status_display(),
                 'risk_hint': plan.risk_hint,
@@ -387,6 +565,7 @@ class PlanExecutionService:
                 'confirmed_batches': progress['confirmed_batches'],
                 'completion_rate': progress['completion_rate'],
                 'pending_alert_count': pending_alert_count,
+                'urgent_batch_count': urgent_batch_count,
                 'dispatched_at': plan.dispatched_at,
                 'archived_at': plan.archived_at,
             })

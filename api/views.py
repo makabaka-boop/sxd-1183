@@ -1,4 +1,5 @@
 from django.utils import timezone
+from django.core.exceptions import ValidationError
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -8,7 +9,7 @@ from django.db.models import Count, Q
 from .models import (
     PaperSpec, PressPlate, ReviewRule, BindingPlan,
     PaperBatch, StatusHistory, BreakRecord, AnomalyAlert,
-    StatusChoices, PlanExecutionStatus, PlanRiskLevel,
+    StatusChoices, PlanExecutionStatus, PlanRiskLevel, PriorityLevel,
 )
 from .serializers import (
     PaperSpecSerializer, PressPlateSerializer, ReviewRuleSerializer,
@@ -18,9 +19,10 @@ from .serializers import (
     PressStartSerializer, CutResultSerializer, WarpNoteSerializer,
     ReviewSerializer, DetainSerializer, BindConfirmSerializer,
     AnomalyAlertSerializer, BatchIdsSerializer, BatchBindConfirmActionSerializer,
+    BatchUrgentSerializer, BatchCancelUrgentSerializer, BatchPriorityUpdateSerializer,
 )
 from .filters import PaperBatchFilter, BindingPlanFilter, AnomalyAlertFilter
-from .services import AnomalyDetectionService, PlanExecutionService
+from .services import AnomalyDetectionService, PlanExecutionService, BatchUrgentService
 
 
 class BaseModelViewSet(viewsets.ModelViewSet):
@@ -80,7 +82,8 @@ class BindingPlanViewSet(BaseModelViewSet):
     queryset = BindingPlan.objects.all()
     filterset_class = BindingPlanFilter
     search_fields = ['plan_code', 'operator']
-    ordering_fields = ['planned_date', 'created_at']
+    ordering_fields = ['planned_date', 'created_at', 'priority', 'plan_code']
+    ordering = ['priority', '-planned_date']
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -103,6 +106,9 @@ class BindingPlanViewSet(BaseModelViewSet):
                 data['pending_alert_count'] = PlanExecutionService._get_plan_alerts(plan).filter(
                     is_resolved=False
                 ).count()
+                data['urgent_batch_count'] = PaperBatch.objects.filter(
+                    binding_plan=plan, is_urgent=True
+                ).count()
                 plans_data.append(data)
             return self.get_paginated_response(plans_data)
         plans_data = []
@@ -114,6 +120,9 @@ class BindingPlanViewSet(BaseModelViewSet):
             data['completion_rate'] = progress['completion_rate']
             data['pending_alert_count'] = AnomalyAlert.objects.filter(
                 binding_plan=plan, is_resolved=False
+            ).count()
+            data['urgent_batch_count'] = PaperBatch.objects.filter(
+                binding_plan=plan, is_urgent=True
             ).count()
             plans_data.append(data)
         return Response(plans_data)
@@ -196,7 +205,9 @@ class PaperBatchViewSet(BaseModelViewSet):
     ordering_fields = [
         'created_at', 'updated_at', 'press_start', 'press_end',
         'batch_no', 'break_count', 'warp_count', 'reject_count',
+        'is_urgent', 'priority', 'urgent_at',
     ]
+    ordering = ['-is_urgent', 'priority', '-created_at']
     http_method_names = ['get', 'post', 'head', 'options']
 
     def get_serializer_class(self):
@@ -420,6 +431,55 @@ class PaperBatchViewSet(BaseModelViewSet):
     def history(self, request, pk=None):
         batch = self.get_object()
         return Response(StatusHistorySerializer(batch.status_histories.all(), many=True).data)
+
+    @action(detail=True, methods=['post'], url_path='mark-urgent')
+    def mark_urgent(self, request, pk=None):
+        batch = self.get_object()
+        serializer = BatchUrgentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            batch = BatchUrgentService.mark_urgent(
+                batch,
+                operator=data['operator'],
+                urgent_reason=data.get('urgent_reason', ''),
+                priority=data.get('priority'),
+            )
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(PaperBatchDetailSerializer(batch).data)
+
+    @action(detail=True, methods=['post'], url_path='cancel-urgent')
+    def cancel_urgent(self, request, pk=None):
+        batch = self.get_object()
+        serializer = BatchCancelUrgentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            batch = BatchUrgentService.cancel_urgent(
+                batch,
+                operator=data['operator'],
+                reason=data.get('reason', ''),
+            )
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(PaperBatchDetailSerializer(batch).data)
+
+    @action(detail=True, methods=['post'], url_path='update-priority')
+    def update_priority(self, request, pk=None):
+        batch = self.get_object()
+        serializer = BatchPriorityUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            batch = BatchUrgentService.update_priority(
+                batch,
+                operator=data['operator'],
+                priority=data['priority'],
+            )
+        except ValidationError as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(PaperBatchDetailSerializer(batch).data)
 
 
 class BreakRecordViewSet(BaseModelViewSet):

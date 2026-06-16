@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     PaperSpec, PressPlate, ReviewRule, BindingPlan,
     PaperBatch, StatusHistory, BreakRecord, AnomalyAlert,
-    StatusChoices, PlanExecutionStatus, PlanRiskLevel,
+    StatusChoices, PlanExecutionStatus, PlanRiskLevel, PriorityLevel,
 )
 
 
@@ -46,6 +46,7 @@ class PaperBatchListSerializer(serializers.ModelSerializer):
     binding_plan_code = serializers.CharField(source='binding_plan.plan_code', read_only=True, default=None)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     press_duration_minutes = serializers.IntegerField(read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
 
     class Meta:
         model = PaperBatch
@@ -58,6 +59,8 @@ class PaperBatchListSerializer(serializers.ModelSerializer):
             'detain_reason', 'reject_reason',
             'review_operator', 'review_at',
             'bind_confirmed_at', 'bind_confirmed_by',
+            'priority', 'priority_display', 'is_urgent', 'urgent_reason',
+            'urgent_at', 'urgent_operator',
             'created_at', 'updated_at',
         ]
 
@@ -69,6 +72,7 @@ class PaperBatchDetailSerializer(serializers.ModelSerializer):
     binding_plan_code = serializers.CharField(source='binding_plan.plan_code', read_only=True, default=None)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     press_duration_minutes = serializers.IntegerField(read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     break_records = BreakRecordSerializer(many=True, read_only=True)
     status_histories = StatusHistorySerializer(many=True, read_only=True)
     allowed_transitions = serializers.SerializerMethodField()
@@ -76,7 +80,7 @@ class PaperBatchDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaperBatch
         fields = '__all__'
-        read_only_fields = ['status', 'press_start', 'press_end', 'created_at', 'updated_at']
+        read_only_fields = ['status', 'press_start', 'press_end', 'created_at', 'updated_at', 'is_urgent', 'urgent_at', 'urgent_operator', 'urgent_cancel_at', 'urgent_cancel_operator']
 
     def get_allowed_transitions(self, obj):
         from .models import TRANSITIONS
@@ -92,7 +96,7 @@ class PaperBatchCreateSerializer(serializers.ModelSerializer):
         model = PaperBatch
         fields = [
             'batch_no', 'spec', 'quantity', 'plate',
-            'binding_plan', 'operator',
+            'binding_plan', 'operator', 'priority', 'urgent_reason',
         ]
 
     def validate(self, attrs):
@@ -108,26 +112,30 @@ class PaperBatchCreateSerializer(serializers.ModelSerializer):
 class BindingPlanListSerializer(serializers.ModelSerializer):
     execution_status_display = serializers.CharField(source='get_execution_status_display', read_only=True)
     risk_hint_display = serializers.CharField(source='get_risk_hint_display', read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     total_batches = serializers.IntegerField(read_only=True, default=0)
     confirmed_batches = serializers.IntegerField(read_only=True, default=0)
     completion_rate = serializers.FloatField(read_only=True, default=0)
     pending_alert_count = serializers.IntegerField(read_only=True, default=0)
+    urgent_batch_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = BindingPlan
         fields = [
             'id', 'plan_code', 'target_quantity', 'planned_date', 'operator',
-            'remark', 'execution_status', 'execution_status_display',
+            'remark', 'priority', 'priority_display', 'urgent_reason',
+            'execution_status', 'execution_status_display',
             'risk_hint', 'risk_hint_display',
             'dispatched_at', 'archived_at', 'created_at',
             'total_batches', 'confirmed_batches', 'completion_rate',
-            'pending_alert_count',
+            'pending_alert_count', 'urgent_batch_count',
         ]
 
 
 class BindingPlanDetailSerializer(serializers.ModelSerializer):
     execution_status_display = serializers.CharField(source='get_execution_status_display', read_only=True)
     risk_hint_display = serializers.CharField(source='get_risk_hint_display', read_only=True)
+    priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     batches = PaperBatchListSerializer(many=True, read_only=True)
 
     class Meta:
@@ -188,6 +196,22 @@ class DetainSerializer(serializers.Serializer):
 
 class BindConfirmSerializer(serializers.Serializer):
     operator = serializers.CharField(max_length=50)
+
+
+class BatchUrgentSerializer(serializers.Serializer):
+    operator = serializers.CharField(max_length=50)
+    urgent_reason = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    priority = serializers.ChoiceField(choices=PriorityLevel.choices, required=False, default=PriorityLevel.URGENT)
+
+
+class BatchCancelUrgentSerializer(serializers.Serializer):
+    operator = serializers.CharField(max_length=50)
+    reason = serializers.CharField(max_length=500, required=False, allow_blank=True)
+
+
+class BatchPriorityUpdateSerializer(serializers.Serializer):
+    operator = serializers.CharField(max_length=50)
+    priority = serializers.ChoiceField(choices=PriorityLevel.choices)
 
 
 class AnomalyAlertSerializer(serializers.ModelSerializer):

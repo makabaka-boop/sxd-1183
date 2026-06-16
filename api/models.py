@@ -95,12 +95,24 @@ class PlanRiskLevel(models.TextChoices):
     HIGH = 'high', '高风险'
 
 
+class PriorityLevel(models.TextChoices):
+    NORMAL = 'normal', '普通'
+    HIGH = 'high', '高'
+    URGENT = 'urgent', '紧急'
+    EXTREME = 'extreme', '特急'
+
+
 class BindingPlan(models.Model):
     plan_code = models.CharField(max_length=50, unique=True, verbose_name='装册计划号')
     target_quantity = models.IntegerField(verbose_name='目标册数')
     planned_date = models.DateField(verbose_name='计划日期')
     operator = models.CharField(max_length=50, verbose_name='负责人')
     remark = models.CharField(max_length=300, blank=True, verbose_name='备注')
+    priority = models.CharField(
+        max_length=20, choices=PriorityLevel.choices,
+        default=PriorityLevel.NORMAL, verbose_name='优先级',
+    )
+    urgent_reason = models.CharField(max_length=500, blank=True, verbose_name='加急原因')
     execution_status = models.CharField(
         max_length=20, choices=PlanExecutionStatus.choices,
         default=PlanExecutionStatus.DRAFT, verbose_name='执行状态',
@@ -153,6 +165,17 @@ class PaperBatch(models.Model):
 
     bind_confirmed_at = models.DateTimeField(null=True, blank=True, verbose_name='装册确认时间')
     bind_confirmed_by = models.CharField(max_length=50, blank=True, verbose_name='装册确认人')
+
+    priority = models.CharField(
+        max_length=20, choices=PriorityLevel.choices,
+        default=PriorityLevel.NORMAL, verbose_name='优先级',
+    )
+    is_urgent = models.BooleanField(default=False, verbose_name='是否加急')
+    urgent_reason = models.CharField(max_length=500, blank=True, verbose_name='加急原因')
+    urgent_at = models.DateTimeField(null=True, blank=True, verbose_name='加急时间')
+    urgent_operator = models.CharField(max_length=50, blank=True, verbose_name='加急操作人')
+    urgent_cancel_at = models.DateTimeField(null=True, blank=True, verbose_name='取消加急时间')
+    urgent_cancel_operator = models.CharField(max_length=50, blank=True, verbose_name='取消加急操作人')
 
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
