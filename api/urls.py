@@ -17,5 +17,6 @@ urlpatterns = [
     path('stats/anomaly-rank/', views.anomaly_rank, name='anomaly-rank'),
     path('stats/pending-review/', views.pending_review_list, name='pending-review'),
     path('stats/press-duration/', views.press_duration_distribution, name='press-duration'),
+    path('stats/plan-dashboard/', views.plan_dashboard_overview, name='plan-dashboard'),
     path('actions/run-detection/', views.run_anomaly_detection, name='run-detection'),
 ]

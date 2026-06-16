@@ -8,18 +8,19 @@ from django.db.models import Count, Q
 from .models import (
     PaperSpec, PressPlate, ReviewRule, BindingPlan,
     PaperBatch, StatusHistory, BreakRecord, AnomalyAlert,
-    StatusChoices,
+    StatusChoices, PlanExecutionStatus, PlanRiskLevel,
 )
 from .serializers import (
     PaperSpecSerializer, PressPlateSerializer, ReviewRuleSerializer,
-    BindingPlanSerializer, PaperBatchListSerializer, PaperBatchDetailSerializer,
+    BindingPlanListSerializer, BindingPlanDetailSerializer,
+    PaperBatchListSerializer, PaperBatchDetailSerializer,
     PaperBatchCreateSerializer, BreakRecordSerializer, StatusHistorySerializer,
     PressStartSerializer, CutResultSerializer, WarpNoteSerializer,
     ReviewSerializer, DetainSerializer, BindConfirmSerializer,
-    AnomalyAlertSerializer,
+    AnomalyAlertSerializer, BatchIdsSerializer, BatchBindConfirmActionSerializer,
 )
-from .filters import PaperBatchFilter
-from .services import AnomalyDetectionService
+from .filters import PaperBatchFilter, BindingPlanFilter, AnomalyAlertFilter
+from .services import AnomalyDetectionService, PlanExecutionService
 
 
 class BaseModelViewSet(viewsets.ModelViewSet):
@@ -77,7 +78,45 @@ class ReviewRuleViewSet(BaseModelViewSet):
 
 class BindingPlanViewSet(BaseModelViewSet):
     queryset = BindingPlan.objects.all()
-    serializer_class = BindingPlanSerializer
+    filterset_class = BindingPlanFilter
+    search_fields = ['plan_code', 'operator']
+    ordering_fields = ['planned_date', 'created_at']
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return BindingPlanDetailSerializer
+        if self.action in ['create', 'update', 'partial_update']:
+            return BindingPlanDetailSerializer
+        return BindingPlanListSerializer
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            plans_data = []
+            for plan in page:
+                data = BindingPlanListSerializer(plan).data
+                progress = PlanExecutionService.recalculate_plan_progress(plan)
+                data['total_batches'] = progress['total_batches']
+                data['confirmed_batches'] = progress['confirmed_batches']
+                data['completion_rate'] = progress['completion_rate']
+                data['pending_alert_count'] = AnomalyAlert.objects.filter(
+                    binding_plan=plan, is_resolved=False
+                ).count()
+                plans_data.append(data)
+            return self.get_paginated_response(plans_data)
+        plans_data = []
+        for plan in queryset:
+            data = BindingPlanListSerializer(plan).data
+            progress = PlanExecutionService.recalculate_plan_progress(plan)
+            data['total_batches'] = progress['total_batches']
+            data['confirmed_batches'] = progress['confirmed_batches']
+            data['completion_rate'] = progress['completion_rate']
+            data['pending_alert_count'] = AnomalyAlert.objects.filter(
+                binding_plan=plan, is_resolved=False
+            ).count()
+            plans_data.append(data)
+        return Response(plans_data)
 
     @action(detail=True, methods=['get'])
     def batches(self, request, pk=None):
@@ -88,18 +127,66 @@ class BindingPlanViewSet(BaseModelViewSet):
     @action(detail=True, methods=['get'])
     def progress(self, request, pk=None):
         plan = self.get_object()
-        batches = PaperBatch.objects.filter(binding_plan=plan)
-        total = batches.count()
-        by_status = list(batches.values('status').annotate(count=Count('status')))
-        ready_count = batches.filter(status=StatusChoices.READY_BIND).count()
-        return Response({
-            'plan_code': plan.plan_code,
-            'target_quantity': plan.target_quantity,
-            'total_batches': total,
-            'ready_count': ready_count,
-            'completion_rate': (ready_count / total * 100) if total > 0 else 0,
-            'by_status': by_status,
-        })
+        data = PlanExecutionService.recalculate_plan_progress(plan)
+        return Response(data)
+
+    @action(detail=True, methods=['get'], url_path='dashboard')
+    def dashboard(self, request, pk=None):
+        plan = self.get_object()
+        data = PlanExecutionService.get_plan_dashboard(plan)
+        return Response(data)
+
+    @action(detail=True, methods=['post'], url_path='dispatch-plan')
+    def dispatch_plan(self, request, pk=None):
+        plan = self.get_object()
+        try:
+            plan = PlanExecutionService.dispatch_plan(plan)
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(BindingPlanDetailSerializer(plan).data)
+
+    @action(detail=True, methods=['post'], url_path='add-batches')
+    def add_batches(self, request, pk=None):
+        plan = self.get_object()
+        serializer = BatchIdsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = PlanExecutionService.add_batches_to_plan(plan, serializer.validated_data['batch_ids'])
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='remove-batches')
+    def remove_batches(self, request, pk=None):
+        plan = self.get_object()
+        serializer = BatchIdsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = PlanExecutionService.remove_batches_from_plan(plan, serializer.validated_data['batch_ids'])
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='batch-bind-confirm')
+    def batch_bind_confirm(self, request, pk=None):
+        plan = self.get_object()
+        serializer = BatchBindConfirmActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            result = PlanExecutionService.batch_bind_confirm(plan, data['batch_ids'], data['operator'])
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='archive')
+    def archive(self, request, pk=None):
+        plan = self.get_object()
+        try:
+            plan = PlanExecutionService.archive_plan(plan)
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+        return Response(BindingPlanDetailSerializer(plan).data)
 
 
 class PaperBatchViewSet(BaseModelViewSet):
@@ -176,6 +263,7 @@ class PaperBatchViewSet(BaseModelViewSet):
             return Response({'error': str(e)}, status=400)
         batch.press_start = timezone.now()
         batch.save()
+        PlanExecutionService.on_batch_status_changed(batch)
         return Response(PaperBatchDetailSerializer(batch).data)
 
     @action(detail=True, methods=['post'], url_path='press-finish')
@@ -189,6 +277,7 @@ class PaperBatchViewSet(BaseModelViewSet):
             return Response({'error': str(e)}, status=400)
         batch.press_end = timezone.now()
         batch.save()
+        PlanExecutionService.on_batch_status_changed(batch)
         return Response(PaperBatchDetailSerializer(batch).data)
 
     @action(detail=True, methods=['post'], url_path='cut-result')
@@ -209,6 +298,7 @@ class PaperBatchViewSet(BaseModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=400)
         AnomalyDetectionService.check_break_cluster(batch)
+        PlanExecutionService.on_batch_status_changed(batch)
         return Response(PaperBatchDetailSerializer(batch).data)
 
     @action(detail=True, methods=['post'], url_path='warp-note')
@@ -273,6 +363,7 @@ class PaperBatchViewSet(BaseModelViewSet):
             batch.reject_reason = data.get('reason', '审核驳回')
             batch.reject_count += 1
             batch.save()
+        PlanExecutionService.on_batch_status_changed(batch)
         return Response(PaperBatchDetailSerializer(batch).data)
 
     @action(detail=True, methods=['post'], url_path='detain')
@@ -299,6 +390,7 @@ class PaperBatchViewSet(BaseModelViewSet):
                 return Response({'error': str(e)}, status=400)
             batch.detain_reason = data['reason']
             batch.save()
+        PlanExecutionService.on_batch_status_changed(batch)
         return Response(PaperBatchDetailSerializer(batch).data)
 
     @action(detail=True, methods=['post'], url_path='bind-confirm')
@@ -319,6 +411,7 @@ class PaperBatchViewSet(BaseModelViewSet):
             remark='装册前确认完成',
         )
         batch.save()
+        PlanExecutionService.on_batch_status_changed(batch)
         return Response(PaperBatchDetailSerializer(batch).data)
 
     @action(detail=True, methods=['get'], url_path='history')
@@ -359,13 +452,15 @@ class BreakRecordViewSet(BaseModelViewSet):
 class AnomalyAlertViewSet(BaseModelViewSet):
     queryset = AnomalyAlert.objects.all()
     serializer_class = AnomalyAlertSerializer
-    filterset_fields = ['alert_type', 'is_resolved', 'batch']
+    filterset_class = AnomalyAlertFilter
 
     @action(detail=True, methods=['post'])
     def resolve(self, request, pk=None):
         alert = self.get_object()
         alert.is_resolved = True
         alert.save()
+        if alert.binding_plan:
+            PlanExecutionService._recalculate_risk(alert.binding_plan)
         return Response(AnomalyAlertSerializer(alert).data)
 
 
@@ -431,3 +526,10 @@ def run_anomaly_detection(request):
         'message': '异常检测已执行',
         'unresolved_alerts': new_alerts,
     })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def plan_dashboard_overview(request):
+    data = PlanExecutionService.get_plan_list_stats()
+    return Response(data)

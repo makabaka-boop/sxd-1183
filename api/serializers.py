@@ -2,7 +2,7 @@ from rest_framework import serializers
 from .models import (
     PaperSpec, PressPlate, ReviewRule, BindingPlan,
     PaperBatch, StatusHistory, BreakRecord, AnomalyAlert,
-    StatusChoices,
+    StatusChoices, PlanExecutionStatus, PlanRiskLevel,
 )
 
 
@@ -21,12 +21,6 @@ class PressPlateSerializer(serializers.ModelSerializer):
 class ReviewRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ReviewRule
-        fields = '__all__'
-
-
-class BindingPlanSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = BindingPlan
         fields = '__all__'
 
 
@@ -111,6 +105,54 @@ class PaperBatchCreateSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class BindingPlanListSerializer(serializers.ModelSerializer):
+    execution_status_display = serializers.CharField(source='get_execution_status_display', read_only=True)
+    risk_hint_display = serializers.CharField(source='get_risk_hint_display', read_only=True)
+    total_batches = serializers.IntegerField(read_only=True, default=0)
+    confirmed_batches = serializers.IntegerField(read_only=True, default=0)
+    completion_rate = serializers.FloatField(read_only=True, default=0)
+    pending_alert_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = BindingPlan
+        fields = [
+            'id', 'plan_code', 'target_quantity', 'planned_date', 'operator',
+            'remark', 'execution_status', 'execution_status_display',
+            'risk_hint', 'risk_hint_display',
+            'dispatched_at', 'archived_at', 'created_at',
+            'total_batches', 'confirmed_batches', 'completion_rate',
+            'pending_alert_count',
+        ]
+
+
+class BindingPlanDetailSerializer(serializers.ModelSerializer):
+    execution_status_display = serializers.CharField(source='get_execution_status_display', read_only=True)
+    risk_hint_display = serializers.CharField(source='get_risk_hint_display', read_only=True)
+    batches = PaperBatchListSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = BindingPlan
+        fields = '__all__'
+        read_only_fields = ['execution_status', 'risk_hint', 'dispatched_at', 'archived_at', 'created_at']
+
+
+class BindingPlanDashboardSerializer(serializers.Serializer):
+    pass
+
+
+class BatchIdsSerializer(serializers.Serializer):
+    batch_ids = serializers.ListField(
+        child=serializers.IntegerField(), allow_empty=False
+    )
+
+
+class BatchBindConfirmActionSerializer(serializers.Serializer):
+    batch_ids = serializers.ListField(
+        child=serializers.IntegerField(), allow_empty=False
+    )
+    operator = serializers.CharField(max_length=50)
+
+
 class PressStartSerializer(serializers.Serializer):
     operator = serializers.CharField(max_length=50)
     plate_id = serializers.IntegerField(required=False, allow_null=True)
@@ -151,6 +193,7 @@ class BindConfirmSerializer(serializers.Serializer):
 class AnomalyAlertSerializer(serializers.ModelSerializer):
     alert_type_display = serializers.CharField(source='get_alert_type_display', read_only=True)
     batch_no = serializers.CharField(source='batch.batch_no', read_only=True, default=None)
+    binding_plan_code = serializers.CharField(source='binding_plan.plan_code', read_only=True, default=None)
 
     class Meta:
         model = AnomalyAlert

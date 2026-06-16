@@ -80,12 +80,38 @@ class ReviewRule(models.Model):
         return cls.objects.filter(is_active=True).first() or cls.objects.first()
 
 
+class PlanExecutionStatus(models.TextChoices):
+    DRAFT = 'draft', '草稿'
+    DISPATCHED = 'dispatched', '已下发'
+    IN_PROGRESS = 'in_progress', '执行中'
+    COMPLETED = 'completed', '已完成'
+    ARCHIVED = 'archived', '已归档'
+
+
+class PlanRiskLevel(models.TextChoices):
+    NONE = 'none', '无风险'
+    LOW = 'low', '低风险'
+    MEDIUM = 'medium', '中风险'
+    HIGH = 'high', '高风险'
+
+
 class BindingPlan(models.Model):
     plan_code = models.CharField(max_length=50, unique=True, verbose_name='装册计划号')
     target_quantity = models.IntegerField(verbose_name='目标册数')
     planned_date = models.DateField(verbose_name='计划日期')
     operator = models.CharField(max_length=50, verbose_name='负责人')
     remark = models.CharField(max_length=300, blank=True, verbose_name='备注')
+    execution_status = models.CharField(
+        max_length=20, choices=PlanExecutionStatus.choices,
+        default=PlanExecutionStatus.DRAFT, verbose_name='执行状态',
+    )
+    risk_hint = models.CharField(
+        max_length=20, choices=PlanRiskLevel.choices,
+        default=PlanRiskLevel.NONE, verbose_name='风险提示',
+        db_column='risk_level',
+    )
+    dispatched_at = models.DateTimeField(null=True, blank=True, verbose_name='下发时间', db_column='issued_at')
+    archived_at = models.DateTimeField(null=True, blank=True, verbose_name='归档时间')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -213,6 +239,7 @@ class AnomalyAlert(models.Model):
         ('review_missing', '审核遗漏'),
     )
     batch = models.ForeignKey(PaperBatch, on_delete=models.CASCADE, related_name='alerts', null=True, blank=True, verbose_name='批次')
+    binding_plan = models.ForeignKey(BindingPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='alerts', verbose_name='装册计划')
     alert_type = models.CharField(max_length=30, choices=ALERT_TYPES, verbose_name='异常类型')
     message = models.CharField(max_length=500, verbose_name='异常描述')
     extra = models.JSONField(default=dict, blank=True, verbose_name='附加信息')

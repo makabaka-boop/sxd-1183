@@ -1,5 +1,5 @@
 import django_filters
-from .models import PaperBatch, StatusChoices
+from .models import PaperBatch, StatusChoices, BindingPlan, PlanExecutionStatus, PlanRiskLevel, AnomalyAlert
 
 
 class PaperBatchFilter(django_filters.FilterSet):
@@ -47,3 +47,27 @@ class PaperBatchFilter(django_filters.FilterSet):
         elif value is False:
             return queryset.filter(reject_count=0)
         return queryset
+
+
+class BindingPlanFilter(django_filters.FilterSet):
+    plan_code = django_filters.CharFilter(lookup_expr='icontains', label='计划号(模糊)')
+    operator = django_filters.CharFilter(lookup_expr='icontains', label='负责人(模糊)')
+    execution_status = django_filters.ChoiceFilter(choices=PlanExecutionStatus.choices, label='执行状态')
+    risk_hint = django_filters.ChoiceFilter(choices=PlanRiskLevel.choices, label='风险提示')
+    planned_date_from = django_filters.DateFilter(field_name='planned_date', lookup_expr='gte', label='计划日期起')
+    planned_date_to = django_filters.DateFilter(field_name='planned_date', lookup_expr='lte', label='计划日期止')
+
+    class Meta:
+        model = BindingPlan
+        fields = ['plan_code', 'operator', 'execution_status', 'risk_hint', 'planned_date_from', 'planned_date_to']
+
+
+class AnomalyAlertFilter(django_filters.FilterSet):
+    alert_type = django_filters.ChoiceFilter(choices=AnomalyAlert.ALERT_TYPES, label='异常类型')
+    is_resolved = django_filters.BooleanFilter(label='是否已处理')
+    batch = django_filters.NumberFilter(field_name='batch_id', label='批次ID')
+    binding_plan = django_filters.NumberFilter(field_name='binding_plan_id', label='装册计划ID')
+
+    class Meta:
+        model = AnomalyAlert
+        fields = ['alert_type', 'is_resolved', 'batch', 'binding_plan']
